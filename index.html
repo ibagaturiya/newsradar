@@ -157,7 +157,7 @@ async function viaProxy(u){
   for(let i=0;i<PROXIES.length;i++){
     const p=(proxyOk+i)%PROXIES.length;
     try{
-      const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),15000);
+      const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),6000);
       const r=await fetch(PROXIES[p](u),{signal:ctl.signal}); clearTimeout(t);
       if(r.ok){ const x=await r.text(); if(x.includes('<rss')){ proxyOk=p; return x; } }
     }catch(e){}
@@ -334,47 +334,41 @@ function groupBy(ents,maxTerms){
   ents.forEach(e=>{ const k=Math.min(e.variants.length,4); if(cur.length && n+k>maxTerms){ out.push(cur); cur=[]; n=0; } cur.push(e); n+=k; });
   if(cur.length) out.push(cur); return out;
 }
+const withTimeout=(p,ms)=>Promise.race([p,new Promise(r=>setTimeout(()=>r(null),ms))]);
 async function scan(){
   $('#hero').classList.add('small');
   $('#list').innerHTML=''; S.items=[]; S.clusters=[];
   const where=S.street? S.street+(S.city?', '+S.city:'') : (S.city||'your area');
-  status(`Scanning around ${where}…`);
-  let ents=[];
-  try{ ents=await placesInRadius(); }catch(e){}
-  if(S.city && !ents.some(p=>p.name===S.city)) ents.unshift(mkEntity(S.city,S.lat,S.lon,1e9,[]));
-  ents=ents.slice(0,20);
-  if(S.street){
-    let tags=[];
-    try{ tags=(await overpass(`[out:json][timeout:25];way[highway]["name"="${S.street.replace(/"/g,'')}"](around:400,${S.lat},${S.lon});out tags 50;`)).map(e=>e.tags); }catch(e){}
-    ents.unshift(mkEntity(S.street,S.lat,S.lon,2e9,tags));
-  }
-  S.names=ents;
-  if(!ents.length){ busy(false); status('Could not work out where this is. Try another search.'); return; }
-
+  const t0=Date.now(), secs=()=>((Date.now()-t0)/1000).toFixed(1);
+  let phase='Scanning';
+  const timer=setInterval(()=>status(`${phase} around ${where}… ${secs()} s`),200);
   const byUrl=new Map();
-  const country=S.country?` sourcecountry:${gdeltCountry(S.country)}`:'';
-  const gGroups=groupBy(ents,10), nGroups=groupBy(ents,6);
-  const total=gGroups.length+nGroups.length; let done=0;
-  const t0=Date.now(), est=Math.max(gGroups.length*5.5, Math.ceil(nGroups.length/3)*3)+3;
-  let gDone=0;
-  const showProgress=()=>{
-    const el=(Date.now()-t0)/1000;
-    const left=Math.max(1,Math.round(Math.max((gGroups.length-gDone)*5.5, est-el)));
-    status(`Scanning around ${where}… ${Math.round(done/total*100)}% · ${Math.round(el)} s · about ${left} s left`);
-  };
-  showProgress(); const timer=setInterval(showProgress,1000);
-  const tick=()=>{ done++; S.items=[...new Set(byUrl.values())]; S.clusters=cluster(S.items); render(); };
+  const update=()=>{ S.items=[...new Set(byUrl.values())]; S.clusters=cluster(S.items); render(); };
+  const q=ents=>ents.flatMap(e=>e.variants.slice(0,4)).map(gq).join(' OR ');
+  const ask=async(g,extra)=>{ const r=await gnews(q(g)+(extra||'')); if(r){ addArticles(r,g,byUrl); update(); } };
 
-  const gd=(async()=>{ for(const g of gGroups){
-    const t=g.flatMap(e=>e.variants.slice(0,4)).map(gq);
-    addArticles(await gdelt((t.length===1?t[0]:'('+t.join(' OR ')+')')+country),g,byUrl); gDone++; tick(); } })();
-  const gn=(async()=>{ let i=0; const w=async()=>{ while(i<nGroups.length){ const g=nGroups[i++];
-    const res=await gnews(g.flatMap(e=>e.variants.slice(0,4)).map(gq).join(' OR '));
-    if(res) addArticles(res,g,byUrl); tick(); } }; await Promise.all([w(),w(),w()]); })();
-  await Promise.all([gd,gn]);
+  // 1. instant: the main place itself (street + city, or just city)
+  const main=[];
+  if(S.street) main.push(mkEntity(S.street,S.lat,S.lon,2e9,[]));
+  if(S.city) main.push(mkEntity(S.city,S.lat,S.lon,1e9,[]));
+  S.names=main;
+  const first = S.street ? Promise.all([ask([main[0]]), ask([main[0]],' '+S.city)]) : (main.length? ask(main) : Promise.resolve());
+
+  // 2. meanwhile find the other places in the radius (max 6 s), then scan them in parallel
+  const more=(async()=>{
+    const all=await withTimeout(placesInRadius().catch(()=>null),6000);
+    if(!all) return;
+    const rest=all.filter(p=>p.name!==S.city).slice(0,18);
+    S.names=[...main,...rest];
+    phase='Scanning nearby places';
+    const groups=groupBy(rest,6); let i=0;
+    const w=async()=>{ while(i<groups.length) await ask(groups[i++]); };
+    await Promise.all([w(),w(),w(),w(),w(),w()]);
+  })();
+
+  await Promise.all([first,more]);
   clearInterval(timer);
-  const secs=Math.round((Date.now()-t0)/1000);
-  status(S.clusters.length? `${S.clusters.length} stories around ${where} (${S.radius} km, last month) · loaded in ${secs} s` : `No news found around ${where} in the last month (${secs} s).`);
+  status(S.clusters.length? `${S.clusters.length} stories around ${where} (${S.radius} km, last month) · ${secs()} s` : `No news found around ${where} in the last month (${secs()} s).`);
   busy(false);
 }
 

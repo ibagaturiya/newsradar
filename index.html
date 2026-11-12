@@ -61,7 +61,7 @@ details a{display:block;padding:6px 0;text-decoration:none;color:var(--ink)}
   <div class="hero" id="hero">
     <div class="radar" id="radar"></div>
     <h1>news<span>radar</span></h1>
-    <div class="ver">v1.7 · 13 Nov 2026</div>
+    <div class="ver">v1.8 · 13 Nov 2026</div>
     <div class="search"><input id="q" placeholder="Search an address, street or city" autocomplete="off"><div class="sugg" id="sugg"></div></div>
     <div class="rad"><div class="row"><span>Radius</span><b id="radv">20 km</b></div><input type="range" id="rad" min="0" max="1000" value="434"></div>
     <div class="or">or</div>
@@ -169,7 +169,7 @@ async function gdelt(query){
     lastCall=Date.now();
     const url=`${GDELT}?query=${encodeURIComponent(query)}&mode=artlist&format=json&sort=datedesc&maxrecords=250${gdeltSpan()}`;
     let txt;
-    try{ txt=await (await fetch(url)).text(); }catch(e){ await sleep(3000); continue; }
+    try{ txt = (MY_PROXY && await viaMine(url)) || await (await fetch(url)).text(); }catch(e){ S.gdErr=(S.gdErr||0)+1; await sleep(1000); continue; }
     if(txt.trim().startsWith('{')){ try{ return (JSON.parse(txt).articles||[]).map(a=>({
       url:a.url,title:a.title,date:parseD(a.seendate),domain:a.domain,img:a.socialimage,lang:a.language,country:a.sourcecountry,src:'GDELT'})); }catch(e){ return []; } }
     if(/limit requests/i.test(txt)){ await sleep(6000); continue; }
@@ -190,8 +190,12 @@ const PROXIES=[
   async u=>(await fetch('https://corsproxy.io/?url='+encodeURIComponent(u))).text(),
 ];
 let proxyDead=false;
+// own proxy (Cloudflare Worker). When set, it is used first and alone.
+const MY_PROXY='';
+async function viaMine(u){ if(!MY_PROXY) return null; try{ const x=await withTimeout(fetch(MY_PROXY+'?url='+encodeURIComponent(u)).then(r=>r.ok?r.text():null),8000); return x; }catch(e){ return null; } }
 // ask all proxies at once, take the first one that returns real RSS
 async function viaProxy(u){
+  const mine=await viaMine(u); if(mine&&mine.includes('<rss')) return mine;
   if(proxyDead) return null;
   const tries=PROXIES.map(p=>withTimeout(p(u).then(x=>{ if(x&&x.includes('<rss')) return x; throw 0; }),7000).then(x=>{ if(!x) throw 0; return x; }));
   try{ return await Promise.any(tries); }catch(e){ return null; }
@@ -385,7 +389,7 @@ async function scan(){
   // backup source without proxy: GDELT, one combined request per phase
   const country=S.country?` sourcecountry:${gdeltCountry(S.country)}`:'';
   const gdAsk=async g=>{ const t=g.flatMap(e=>e.variants.slice(0,2)).slice(0,12).map(gq); if(!t.length) return;
-    const r=await withTimeout(gdelt((t.length===1?t[0]:'('+t.join(' OR ')+')')+country),12000); if(r){ addArticles(r,g,byUrl); update(); } };
+    const r=await withTimeout(gdelt((t.length===1?t[0]:'('+t.join(' OR ')+')')+country),12000); S.gdN=(S.gdN||0)+(r?r.length:0); if(r===null) S.gdErr=(S.gdErr||0)+1; if(r){ addArticles(r,g,byUrl); update(); } };
 
   // 1. instant: the street itself, or the city when the radius is big
   const main=[];
@@ -396,7 +400,7 @@ async function scan(){
     .forEach(n=>main.push(mkEntity(n,S.lat,S.lon,5e8,[])));
   if(!main.length && S.city) main.push(mkEntity(S.city,S.lat,S.lon,1e9,[]));
   S.names=[...main]; showSearched();
-  proxyDead=false; S.dbg='';
+  proxyDead=false; S.dbg=''; S.gdN=0; S.gdErr=0;
   const first = main.length? Promise.all([ask(main),gdAsk(main)]) : Promise.resolve();
 
   // 2. meanwhile find districts (and streets for small radius) inside the radius, then scan them in parallel
@@ -422,6 +426,7 @@ async function scan(){
 
   await Promise.all([first,more]);
   clearInterval(timer);
+  S.dbg=(S.dbg?S.dbg+' · ':'')+`google ${asks-fails}/${asks} ok · gdelt ${S.gdN} hits${S.gdErr?' ('+S.gdErr+' errors)':''}`;
   if(S.dbg) $('#searched').innerHTML+=`<br><span style="opacity:.6">${S.dbg}</span>`;
   if(S.clusters.length) status(`${S.clusters.length} stories within ${S.radius} km of ${where} · ${secs()} s`);
   else if(asks && fails===asks) status(`No news found, and Google News was not reachable (free proxy busy), so only the backup source was searched (${secs()} s).`);

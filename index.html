@@ -50,6 +50,8 @@ button.go:disabled{opacity:.55;cursor:wait}
 .tag.ctx{background:#2a2216;color:var(--warn)}
 details{margin-top:7px;font-size:13px;color:var(--mute)}
 details a{display:block;padding:6px 0;text-decoration:none;color:var(--ink)}
+.searched{font-size:12px;color:var(--mute);margin-top:8px;line-height:1.6}
+.searched b{color:var(--ink);font-weight:500}
 .empty{color:var(--mute);text-align:center;padding:30px 0}
 </style>
 </head>
@@ -63,12 +65,13 @@ details a{display:block;padding:6px 0;text-decoration:none;color:var(--ink)}
     <div class="or">or</div>
     <button class="go" id="go">Search news nearby</button>
     <div class="status" id="status"></div>
+    <div class="searched" id="searched"></div>
   </div>
   <div id="list"></div>
 </main>
 <script>
 const $=s=>document.querySelector(s);
-const SPAN='1m';
+const SPAN='all';
 const S={lat:null,lon:null,city:'',country:'',cc:'',street:'',radius:20,names:[],items:[],clusters:[],running:false};
 /* ---------- name variants (spelling + OSM old/alt names) ---------- */
 function norm(s){
@@ -105,6 +108,15 @@ async function overpass(q){
   const r=await fetch(OVERPASS,{method:'POST',body:'data='+encodeURIComponent(q)});
   if(!r.ok) throw new Error('Map data server busy ('+r.status+'), try again in a minute');
   return (await r.json()).elements||[];
+}
+async function streetsNear(){
+  const m=Math.min(S.radius,3)*1000;
+  const els=await overpass(`[out:json][timeout:20];way[highway~"^(primary|secondary|tertiary|residential|pedestrian|living_street)$"][name](around:${m},${S.lat},${S.lon});out tags center 1500;`);
+  const w={primary:5,secondary:4,tertiary:3,pedestrian:3,residential:1,living_street:1};
+  const by=new Map();
+  els.forEach(e=>{ const n=e.tags.name; if(!n||n.length<5) return;
+    const o=by.get(n)||{name:n,lat:e.center.lat,lon:e.center.lon,score:0,tags:[]}; o.score+=w[e.tags.highway]||1; o.tags.push(e.tags); by.set(n,o); });
+  return [...by.values()].sort((a,b)=>b.score-a.score).map(o=>mkEntity(o.name,o.lat,o.lon,o.score,o.tags));
 }
 async function placesInRadius(){
   const m=Math.min(S.radius,1000)*1000;
@@ -337,29 +349,37 @@ function groupBy(ents,maxTerms){
 const withTimeout=(p,ms)=>Promise.race([p,new Promise(r=>setTimeout(()=>r(null),ms))]);
 async function scan(){
   $('#hero').classList.add('small');
-  $('#list').innerHTML=''; S.items=[]; S.clusters=[];
+  $('#list').innerHTML=''; $('#searched').innerHTML=''; S.items=[]; S.clusters=[];
+  const small=S.radius<10;
   const where=S.street? S.street+(S.city?', '+S.city:'') : (S.city||'your area');
   const t0=Date.now(), secs=()=>((Date.now()-t0)/1000).toFixed(1);
-  let phase='Scanning';
-  const timer=setInterval(()=>status(`${phase} around ${where}… ${secs()} s`),200);
+  let phase='Scanning', fails=0, asks=0;
+  const timer=setInterval(()=>status(`${phase} ${S.radius} km around ${where}… ${secs()} s`),200);
   const byUrl=new Map();
   const update=()=>{ S.items=[...new Set(byUrl.values())]; S.clusters=cluster(S.items); render(); };
-  const q=ents=>ents.flatMap(e=>e.variants.slice(0,4)).map(gq).join(' OR ');
-  const ask=async(g,extra)=>{ const r=await gnews(q(g)+(extra||'')); if(r){ addArticles(r,g,byUrl); update(); } };
+  // small radius: never search the whole city, only use it to make sure it is the right place
+  const cityTerm = small && S.city ? ' '+gq(S.city) : '';
+  const q=ents=>ents.flatMap(e=>e.variants.slice(0,3)).map(gq).join(' OR ');
+  const showSearched=()=>{ $('#searched').innerHTML='Searching for: '+S.names.map(n=>'<b>'+esc(n.name)+'</b>').join(', ')+(cityTerm?' (in '+esc(S.city)+')':''); };
+  const ask=async g=>{ asks++; const r=await gnews(q(g)+cityTerm); if(!r){ fails++; return; } addArticles(r,g,byUrl); update(); };
 
-  // 1. instant: the main place itself (street + city, or just city)
+  // 1. instant: the street itself, or the city when the radius is big
   const main=[];
   if(S.street) main.push(mkEntity(S.street,S.lat,S.lon,2e9,[]));
-  if(S.city) main.push(mkEntity(S.city,S.lat,S.lon,1e9,[]));
-  S.names=main;
-  const first = S.street ? Promise.all([ask([main[0]]), ask([main[0]],' '+S.city)]) : (main.length? ask(main) : Promise.resolve());
+  if(!small && S.city) main.push(mkEntity(S.city,S.lat,S.lon,1e9,[]));
+  S.names=[...main]; showSearched();
+  const first = main.length? ask(main) : Promise.resolve();
 
-  // 2. meanwhile find the other places in the radius (max 6 s), then scan them in parallel
+  // 2. meanwhile find districts (and streets for small radius) inside the radius, then scan them in parallel
   const more=(async()=>{
-    const all=await withTimeout(placesInRadius().catch(()=>null),6000);
-    if(!all) return;
-    const rest=all.filter(p=>p.name!==S.city).slice(0,18);
-    S.names=[...main,...rest];
+    const [places,streets]=await Promise.all([
+      withTimeout(placesInRadius().catch(()=>null),6000),
+      S.radius<=3? withTimeout(streetsNear().catch(()=>null),6000) : null ]);
+    const seen=new Set(main.map(m=>m.name));
+    if(small && S.city) seen.add(S.city);
+    const rest=[...(places||[]).slice(0,12),...(streets||[]).slice(0,14)].filter(p=>!seen.has(p.name)&&seen.add(p.name));
+    if(!rest.length) return;
+    S.names=[...main,...rest]; showSearched();
     phase='Scanning nearby places';
     const groups=groupBy(rest,6); let i=0;
     const w=async()=>{ while(i<groups.length) await ask(groups[i++]); };
@@ -368,7 +388,9 @@ async function scan(){
 
   await Promise.all([first,more]);
   clearInterval(timer);
-  status(S.clusters.length? `${S.clusters.length} stories around ${where} (${S.radius} km, last month) · ${secs()} s` : `No news found around ${where} in the last month (${secs()} s).`);
+  if(S.clusters.length) status(`${S.clusters.length} stories within ${S.radius} km of ${where} · ${secs()} s`);
+  else if(asks && fails===asks) status(`Could not reach Google News (the free proxy is busy). Try again in a minute.`);
+  else status(`No news found within ${S.radius} km of ${where} (${secs()} s).`);
   busy(false);
 }
 

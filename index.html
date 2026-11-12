@@ -61,7 +61,7 @@ details a{display:block;padding:6px 0;text-decoration:none;color:var(--ink)}
   <div class="hero" id="hero">
     <div class="radar" id="radar"></div>
     <h1>news<span>radar</span></h1>
-    <div class="ver">v1.6 · 13 Nov 2026</div>
+    <div class="ver">v1.7 · 13 Nov 2026</div>
     <div class="search"><input id="q" placeholder="Search an address, street or city" autocomplete="off"><div class="sugg" id="sugg"></div></div>
     <div class="rad"><div class="row"><span>Radius</span><b id="radv">20 km</b></div><input type="range" id="rad" min="0" max="1000" value="434"></div>
     <div class="or">or</div>
@@ -112,6 +112,24 @@ async function overpass(q){
     try{ const r=await fetch(u+'?data='+encodeURIComponent(q)); if(r.ok) return (await r.json()).elements||[]; }catch(e){}
   }
   throw new Error('Map data servers busy');
+}
+// sample points on two rings inside the radius and ask Nominatim what is there (works without Overpass)
+async function ringNames(){
+  const r=S.radius, zoom = r<=3?17 : r<=15?14 : r<=60?12 : 10;
+  const keys = r<=3? ['road','neighbourhood','quarter','suburb'] : r<=15? ['neighbourhood','quarter','suburb','city_district','village','town'] : ['suburb','village','town','city','municipality'];
+  const pts=[];
+  [0.45,0.95].forEach((ring,ri)=>{ for(let k=0;k<6;k++){ const a=(k*60+ri*30)*Math.PI/180;
+    pts.push([S.lat+r*ring*Math.cos(a)/111, S.lon+r*ring*Math.sin(a)/(111*Math.cos(S.lat*Math.PI/180))]); } });
+  const out=new Map();
+  await Promise.all(pts.map(async([la,lo],i)=>{
+    await sleep(i*150);
+    try{
+      const d=await (await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${la}&lon=${lo}&zoom=${zoom}&addressdetails=1`)).json();
+      const a=d.address||{};
+      keys.forEach(k=>{ const n=a[k]; if(n&&n.length>=4&&!out.has(n)) out.set(n,mkEntity(n,la,lo,1,[])); });
+    }catch(e){}
+  }));
+  return [...out.values()];
 }
 async function streetsNear(){
   const m=Math.min(S.radius,3)*1000;
@@ -378,28 +396,33 @@ async function scan(){
     .forEach(n=>main.push(mkEntity(n,S.lat,S.lon,5e8,[])));
   if(!main.length && S.city) main.push(mkEntity(S.city,S.lat,S.lon,1e9,[]));
   S.names=[...main]; showSearched();
-  proxyDead=false;
+  proxyDead=false; S.dbg='';
   const first = main.length? Promise.all([ask(main),gdAsk(main)]) : Promise.resolve();
 
   // 2. meanwhile find districts (and streets for small radius) inside the radius, then scan them in parallel
   const more=(async()=>{
-    const [places,streets]=await Promise.all([
+    const [places,streets,ring]=await Promise.all([
       withTimeout(placesInRadius().catch(()=>null),10000),
-      S.radius<=3? withTimeout(streetsNear().catch(()=>null),10000) : null ]);
+      S.radius<=3? withTimeout(streetsNear().catch(()=>null),10000) : null,
+      withTimeout(ringNames().catch(()=>null),8000) ]);
     const seen=new Set(main.map(m=>m.name));
     if(small && S.city) seen.add(S.city);
-    const rest=[...(places||[]).slice(0,12),...(streets||[]).slice(0,14)].filter(p=>!seen.has(p.name)&&seen.add(p.name));
+    S.dbg=`places ${places?places.length:'failed'} · ring ${ring?ring.length:'failed'} · streets ${streets?streets.length:'-'}`;
+    const rest=[...(places||[]).slice(0,12),...(ring||[]),...(streets||[]).slice(0,10)].filter(p=>!seen.has(p.name)&&seen.add(p.name));
     if(!rest.length) return;
-    S.names=[...main,...rest]; showSearched();
+    S.names=[...main,...rest.slice(0,24)];
+    showSearched();
     phase='Scanning nearby places';
-    const gdRest=gdAsk(rest);
-    const groups=groupBy(rest,6); let i=0;
+    const r24=rest.slice(0,24);
+    const gdRest=gdAsk(r24);
+    const groups=groupBy(r24,6); let i=0;
     const w=async()=>{ while(i<groups.length) await ask(groups[i++]); };
     await Promise.all([w(),w(),w(),w(),w(),w(),gdRest]);
   })();
 
   await Promise.all([first,more]);
   clearInterval(timer);
+  if(S.dbg) $('#searched').innerHTML+=`<br><span style="opacity:.6">${S.dbg}</span>`;
   if(S.clusters.length) status(`${S.clusters.length} stories within ${S.radius} km of ${where} · ${secs()} s`);
   else if(asks && fails===asks) status(`No news found, and Google News was not reachable (free proxy busy), so only the backup source was searched (${secs()} s).`);
   else status(`No news found within ${S.radius} km of ${where} (${secs()} s).`);

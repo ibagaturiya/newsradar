@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>newsradar</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0c0f0d;--panel:#141a16;--line:#25302a;--ink:#e7efe9;--mute:#8a9a90;--acc:#7cff9b;--warn:#ffb86b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Space Grotesk",system-ui,sans-serif}
+a{color:inherit}
+main{max-width:680px;margin:0 auto;padding:0 18px 60px}
+.hero{display:flex;flex-direction:column;align-items:center;text-align:center;padding:56px 0 28px;transition:padding .4s}
+.hero.small{padding:22px 0 10px}
+.radar{width:120px;height:120px;border-radius:50%;border:2px solid var(--acc);position:relative;overflow:hidden;cursor:pointer;
+  background:radial-gradient(circle,transparent 30%,rgba(124,255,155,.08) 31%,transparent 33%,transparent 63%,rgba(124,255,155,.08) 64%,transparent 66%);transition:all .4s}
+.radar:after{content:"";position:absolute;inset:0;background:conic-gradient(from 0deg,transparent 0 290deg,rgba(124,255,155,.75) 360deg);animation:spin 3s linear infinite}
+.busy .radar:after{animation-duration:1s}
+.small .radar{width:46px;height:46px}
+@keyframes spin{to{transform:rotate(360deg)}}
+h1{font-size:28px;margin:18px 0 4px;letter-spacing:.5px}
+h1 span{color:var(--acc)}
+.small h1{font-size:20px;margin-top:10px}
+button.go{margin-top:22px;background:var(--acc);color:#04130a;border:0;border-radius:14px;font:700 18px "Space Grotesk",sans-serif;padding:16px 34px;cursor:pointer}
+button.go:disabled{opacity:.55;cursor:wait}
+.small button.go{margin-top:12px;font-size:15px;padding:10px 20px}
+.status{font-size:14px;color:var(--mute);margin-top:12px;min-height:20px}
+.search{margin-top:20px;width:100%;max-width:420px;position:relative;text-align:left}
+.search input{width:100%;background:var(--panel);border:1px solid var(--line);color:var(--ink);padding:11px 12px;border-radius:10px;font:inherit;outline:none}
+.sugg{position:absolute;left:0;right:0;top:100%;margin-top:4px;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;z-index:10;display:none}
+.sugg div{padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:15px}
+.sugg div:hover,.sugg div.on{background:#1b241e}
+.sugg small{display:block;color:var(--mute);font-size:12px;margin-top:2px}
+.rad{width:100%;max-width:420px;margin-top:16px}
+.rad .row{display:flex;justify-content:space-between;font-size:13px;color:var(--mute)}
+.rad b{font-family:"JetBrains Mono",monospace;color:var(--acc);font-weight:600}
+.rad input{width:100%;accent-color:var(--acc)}
+.or{font-size:12px;color:var(--mute);margin-top:14px;text-transform:uppercase;letter-spacing:1px}
+.small .search,.small .rad{max-width:520px}
+.month{position:sticky;top:0;background:var(--bg);font-family:"JetBrains Mono",monospace;color:var(--acc);font-size:13px;padding:14px 0 6px;border-bottom:1px dashed var(--line);z-index:2}
+.card{display:grid;grid-template-columns:1fr 76px;gap:12px;padding:14px 0;border-bottom:1px solid var(--line)}
+.card.noimg{grid-template-columns:1fr}
+.card img{width:76px;height:76px;object-fit:cover;border-radius:10px;background:var(--panel)}
+.meta{font-size:12px;color:var(--mute);font-family:"JetBrains Mono",monospace}
+.title{font-size:16px;line-height:1.35;margin:4px 0 7px;text-decoration:none;display:block}
+.title:hover{color:var(--acc)}
+.tags{display:flex;flex-wrap:wrap;gap:5px}
+.tag{font-size:11px;padding:2px 7px;border-radius:6px;background:#173322;color:var(--acc)}
+.tag.ctx{background:#2a2216;color:var(--warn)}
+details{margin-top:7px;font-size:13px;color:var(--mute)}
+details a{display:block;padding:6px 0;text-decoration:none;color:var(--ink)}
+.empty{color:var(--mute);text-align:center;padding:30px 0}
+</style>
+</head>
+<body>
+<main>
+  <div class="hero" id="hero">
+    <div class="radar" id="radar"></div>
+    <h1>news<span>radar</span></h1>
+    <div class="search"><input id="q" placeholder="Search an address, street or city" autocomplete="off"><div class="sugg" id="sugg"></div></div>
+    <div class="rad"><div class="row"><span>Radius</span><b id="radv">20 km</b></div><input type="range" id="rad" min="0" max="1000" value="434"></div>
+    <div class="or">or</div>
+    <button class="go" id="go">Search news nearby</button>
+    <div class="status" id="status"></div>
+  </div>
+  <div id="list"></div>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+const SPAN='1m';
+const S={lat:null,lon:null,city:'',country:'',cc:'',street:'',radius:20,names:[],items:[],clusters:[],running:false};
+/* ---------- name variants (spelling + OSM old/alt names) ---------- */
+function norm(s){
+  return String(s||'').toLowerCase().replace(/ß/g,'ss').replace(/ä/g,'a').replace(/ö/g,'o').replace(/ü/g,'u')
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .replace(/([aou])e/g,'$1')
+    .replace(/str\.(?=\W|$)/g,'strasse').replace(/[^a-z0-9]+/g,' ').trim();
+}
+const VARTAGS=['name:de','name:en','name:fr','name:it','alt_name','old_name','official_name','short_name','loc_name'];
+function variantsFor(name,tagsList){
+  const base=new Set([name]), old=new Set();
+  (tagsList||[]).forEach(t=>VARTAGS.forEach(k=>{ if(t&&t[k]) t[k].split(';').forEach(v=>{ v=v.trim(); if(v){ base.add(v); if(k==='old_name') old.add(v);} }); }));
+  const out=new Set();
+  base.forEach(n=>{
+    out.add(n);
+    if(/stra(ss|ß)e\b/i.test(n)){
+      out.add(n.replace(/stra(ss|ß)e\b/i,'straße')); out.add(n.replace(/stra(ss|ß)e\b/i,'strasse')); out.add(n.replace(/stra(ss|ß)e\b/i,'str.'));
+    }
+    if(/[äöü]/i.test(n)){
+      out.add(n.replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/Ä/g,'Ae').replace(/Ö/g,'Oe').replace(/Ü/g,'Ue'));
+      out.add(n.normalize('NFD').replace(/[̀-ͯ]/g,''));
+    }
+  });
+  // dedupe by exact lowercase, keep main name first
+  const seen=new Set(), list=[];
+  [name,...base,...out].forEach(v=>{ const k=v.toLowerCase(); if(v.length>=4 && !seen.has(k)){ seen.add(k); list.push(v);} });
+  return {variants:list.slice(0,6), keys:[...new Set(list.map(norm))].filter(k=>k.length>=4), old:[...old]};
+}
+function mkEntity(name,lat,lon,score,tagsList){ return {name,lat,lon,score,count:0,...variantsFor(name,tagsList)}; }
+
+/* ---------- overpass: names in radius ---------- */
+const OVERPASS='https://overpass-api.de/api/interpreter';
+async function overpass(q){
+  const r=await fetch(OVERPASS,{method:'POST',body:'data='+encodeURIComponent(q)});
+  if(!r.ok) throw new Error('Map data server busy ('+r.status+'), try again in a minute');
+  return (await r.json()).elements||[];
+}
+async function placesInRadius(){
+  const m=Math.min(S.radius,1000)*1000;
+  const kinds = S.radius>150 ? 'city|town' : S.radius>40 ? 'city|town|suburb' : 'city|town|suburb|village|quarter|neighbourhood';
+  const els=await overpass(`[out:json][timeout:40];node[place~"^(${kinds})$"][name](around:${m},${S.lat},${S.lon});out tags 600;`);
+  const rank={city:6,town:5,suburb:4,quarter:3,village:2,neighbourhood:1};
+  const seen=new Map();
+  els.forEach(e=>{
+    const n=e.tags.name; if(!n||n.length<4||seen.has(n)) return;
+    const pop=parseInt((e.tags.population||'0').replace(/\D/g,''))||0;
+    seen.set(n,mkEntity(n,e.lat,e.lon,rank[e.tags.place]*1e7+pop,[e.tags]));
+  });
+  return [...seen.values()].sort((a,b)=>b.score-a.score);
+}
+/* ---------- source 1: GDELT ---------- */
+const GDELT='https://api.gdeltproject.org/api/v2/doc/doc';
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let lastCall=0;
+function gdeltSpan(){
+  const v=SPAN;
+  if(v==='all') return '&startdatetime=20170101000000';
+  if(v==='1y'){ const d=new Date(Date.now()-365*864e5); return '&startdatetime='+d.toISOString().replace(/\D/g,'').slice(0,14); }
+  return '&timespan='+v;
+}
+async function gdelt(query){
+  for(let attempt=0;attempt<3;attempt++){
+    const wait=5500-(Date.now()-lastCall); if(wait>0) await sleep(wait);
+    lastCall=Date.now();
+    const url=`${GDELT}?query=${encodeURIComponent(query)}&mode=artlist&format=json&sort=datedesc&maxrecords=250${gdeltSpan()}`;
+    let txt;
+    try{ txt=await (await fetch(url)).text(); }catch(e){ await sleep(3000); continue; }
+    if(txt.trim().startsWith('{')){ try{ return (JSON.parse(txt).articles||[]).map(a=>({
+      url:a.url,title:a.title,date:parseD(a.seendate),domain:a.domain,img:a.socialimage,lang:a.language,country:a.sourcecountry,src:'GDELT'})); }catch(e){ return []; } }
+    if(/limit requests/i.test(txt)){ await sleep(6000); continue; }
+    console.warn('GDELT:',txt.slice(0,200)); return [];
+  }
+  return [];
+}
+const gq = s => `"${s.replace(/"/g,'')}"`;
+const gdeltCountry = c => c.toLowerCase().replace(/[^a-z]/g,'');
+
+/* ---------- source 2: Google News RSS (local papers, older years) ---------- */
+const PROXIES=[
+  u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
+  u=>'https://corsproxy.io/?url='+encodeURIComponent(u),
+  u=>'https://api.codetabs.com/v1/proxy/?quest='+encodeURIComponent(u),
+];
+let proxyOk=0;
+async function viaProxy(u){
+  for(let i=0;i<PROXIES.length;i++){
+    const p=(proxyOk+i)%PROXIES.length;
+    try{
+      const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),15000);
+      const r=await fetch(PROXIES[p](u),{signal:ctl.signal}); clearTimeout(t);
+      if(r.ok){ const x=await r.text(); if(x.includes('<rss')){ proxyOk=p; return x; } }
+    }catch(e){}
+  }
+  return null;
+}
+const GN_LOCALE={CH:['de','CH'],DE:['de','DE'],AT:['de','AT'],LI:['de','CH'],FR:['fr','FR'],BE:['fr','BE'],IT:['it','IT'],ES:['es','ES'],PT:['pt-PT','PT'],NL:['nl','NL'],PL:['pl','PL'],
+  GB:['en-GB','GB'],IE:['en-IE','IE'],US:['en-US','US'],CA:['en-CA','CA'],AU:['en-AU','AU'],SE:['sv','SE'],NO:['no','NO'],DK:['da','DK'],CZ:['cs','CZ'],JP:['ja','JP'],GE:['ka','GE'],RU:['ru','RU'],UA:['uk','UA']};
+function gnWhen(){ return {'1w':' when:7d','1m':' when:30d','3m':' when:90d','1y':' when:1y','all':''}[SPAN]; }
+async function gnews(query){
+  const [hl,gl]=GN_LOCALE[S.cc]||['en-US','US'];
+  const lang=hl.split('-')[0];
+  const u=`https://news.google.com/rss/search?q=${encodeURIComponent(query+gnWhen())}&hl=${hl}&gl=${gl}&ceid=${gl}:${lang}`;
+  const xml=await viaProxy(u); if(!xml) return null;
+  const doc=new DOMParser().parseFromString(xml,'text/xml');
+  return [...doc.querySelectorAll('item')].map(it=>{
+    const src=it.querySelector('source');
+    let title=it.querySelector('title')?.textContent||'';
+    const sname=src?.textContent||'';
+    if(sname && title.endsWith(' - '+sname)) title=title.slice(0,-(sname.length+3));
+    let domain=sname; try{ domain=new URL(src.getAttribute('url')).hostname.replace(/^www\./,''); }catch(e){}
+    return {url:it.querySelector('link')?.textContent,title,date:new Date(it.querySelector('pubDate')?.textContent||0),domain,src:'Google News'};
+  });
+}
+
+/* ---------- context tags ---------- */
+const CTX=[
+ ['crime',/\b(polic|polizei|polizia|arrest|festgenommen|verhaftet|robbery|raub|überfall|stab|messer|murder|mord|tötung|theft|diebstahl|einbruch|burglar|court|gericht|prozess|urteil|verdacht|suspect|shooting|schüsse)/i],
+ ['accident',/\b(accident|unfall|crash|kollision|collision|verletzt|injured|zusammenstoss)/i],
+ ['traffic',/\b(traffic|verkehr|stau|tram|bus|sbb|vbz|bvg|zug|train|bahn|velo|bike|cycl|parking|parkplatz|sperrung|closure|road|umleitung)/i],
+ ['fire / emergency',/\b(fire|brand|feuer|feuerwehr|explosion|evacuat|evakuier|rescue|rettung|blaulicht)/i],
+ ['construction',/\b(construct|baustelle|neubau|bauprojekt|sanierung|renovat|abriss|demolition|hochhaus|tower|überbauung|building|gebäude|bauarbeiten)/i],
+ ['housing',/\b(housing|wohnung|wohnen|miete|mieter|rent|tenant|apartment|immobil|real estate|landlord|vermieter)/i],
+ ['politics',/\b(council|gemeinderat|stadtrat|kantonsrat|senat|election|wahl|abstimmung|vote|referend|initiative|politi|mayor|bürgermeister|stadtpräsident|parliament|parlament|government|regierung|minister|partei)/i],
+ ['protest',/\b(protest|demo\b|demonstr|strike|streik|kundgebung|rally)/i],
+ ['business',/\b(company|firma|unternehmen|shop|laden|store|restaurant|café|cafe|bar\b|eröffn|opening|schliess|closes|closing|jobs|stellen|startup|bank|market|markt|price|preis|konkurs|bankrupt|invest)/i],
+ ['culture',/\b(festival|concert|konzert|museum|exhibition|ausstellung|theater|theatre|film|kino|cinema|art\b|kunst|music|musik|oper|opera|book|buch)/i],
+ ['sport',/\b(fc\b|football|fussball|soccer|match|league|liga|hockey|stadion|stadium|marathon|olymp|tennis|derby)/i],
+ ['weather / nature',/\b(storm|sturm|unwetter|flood|hochwasser|überschwemm|snow|schnee|heat|hitze|climate|klima|tree|bäume|park\b|river|fluss|lake|wildlife)/i],
+ ['health',/\b(hospital|spital|krankenhaus|klinik|health|gesundheit|virus|covid|doctor|arzt)/i],
+ ['education',/\b(school|schule|university|universität|eth\b|student|kita|kindergarten)/i],
+];
+function contexts(title){ return CTX.filter(([_,re])=>re.test(title)).map(([n])=>n); }
+
+/* ---------- store, matching, clustering ---------- */
+const STOP=new Set('der die das und oder mit von für fur auf aus bei nach über uber eine einer einem einen ist sind wird werden nicht noch auch wie was the and for with from that this into over after about have has are was were will les des une pour dans avec sur della delle con per'.split(' '));
+function tokens(t){ return new Set(norm(t).split(' ').filter(w=>w.length>=4 && !STOP.has(w))); }
+function similar(a,b){ let i=0; a.forEach(x=>{ if(b.has(x)) i++; }); const u=a.size+b.size-i; return u? i/u : 0; }
+function matchEntities(title,group){
+  const nt=' '+norm(title)+' ';
+  return group.filter(e=>e.keys.some(k=>nt.includes(' '+k+' ')||nt.includes(k)));
+}
+function addArticles(arts,group,byUrl){
+  (arts||[]).forEach(a=>{
+    if(!a.url||!a.title) return;
+    const hit=matchEntities(a.title,group);
+    const key=norm(a.title).slice(0,90)+'|'+a.domain;
+    const prev=byUrl.get(a.url)||byUrl.get(key);
+    const it={...a, tok:tokens(a.title), ctx:contexts(a.title),
+      places: hit.length? hit.map(e=>e.name) : group.map(e=>e.name), exact: hit.length>0 || group.length===1};
+    if(prev){ if(!prev.exact && it.exact){ prev.places=it.places; prev.exact=true; } if(!prev.img&&it.img) prev.img=it.img; return; }
+    byUrl.set(a.url,it); byUrl.set(key,it);
+  });
+}
+function cluster(items){
+  items=[...new Set(items)].sort((a,b)=>b.date-a.date);
+  const cl=[];
+  items.forEach(it=>{
+    const c=cl.find(c=>Math.abs(c.date-it.date)<4*864e5 && similar(c.tok,it.tok)>=0.45);
+    if(c){ c.items.push(it); it.tok.forEach(x=>c.tok.add(x)); }
+    else cl.push({date:it.date,tok:new Set(it.tok),items:[it]});
+  });
+  cl.forEach(c=>{
+    c.head=c.items.find(i=>i.img)||c.items[0];
+    c.first=new Date(Math.min(...c.items.map(i=>+i.date)));
+    c.ctx=[...new Set(c.items.flatMap(i=>i.ctx))].slice(0,3); if(!c.ctx.length) c.ctx=['general'];
+    const ex=c.items.filter(i=>i.exact);
+    c.exact=ex.length>0; c.places=[...new Set((ex.length?ex:c.items).flatMap(i=>i.places))];
+    c.srcs=[...new Set(c.items.map(i=>i.src))];
+  });
+  return cl;
+}
+
+
+function parseD(s){ const m=(s||'').match(/(\d{4})(\d\d)(\d\d)T?(\d\d)?(\d\d)?/); return m? new Date(Date.UTC(m[1],m[2]-1,m[3],m[4]||0,m[5]||0)) : new Date(0); }
+
+
+function status(t){ $('#status').textContent=t; }
+function busy(on){ S.running=on; $('#go').disabled=on; $('#hero').classList.toggle('busy',on); }
+
+function locate(){
+  return new Promise((res,rej)=>{
+    if(!navigator.geolocation) return rej();
+    navigator.geolocation.getCurrentPosition(p=>res([p.coords.latitude,p.coords.longitude]),rej,{timeout:12000,maximumAge:600000});
+  });
+}
+async function reverse(lat,lon){
+  const d=await (await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=12&addressdetails=1&accept-language=en`)).json();
+  return d.address||{};
+}
+async function geocode(q){
+  const d=await (await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=1&accept-language=en&q=${encodeURIComponent(q)}`)).json();
+  if(!d[0]) throw new Error('Place not found');
+  return [+d[0].lat,+d[0].lon,d[0].address||{}];
+}
+function setPlace(lat,lon,a){
+  S.lat=lat; S.lon=lon;
+  S.city=a.city||a.town||a.village||a.municipality||a.county||'';
+  S.country=a.country||''; S.cc=(a.country_code||'').toUpperCase();
+}
+
+$('#go').onclick=async()=>{
+  if(S.running) return; busy(true); S.street='';
+  status('Finding you…');
+  try{
+    const [lat,lon]=await locate();
+    setPlace(lat,lon,await reverse(lat,lon));
+    await scan();
+  }catch(e){
+    busy(false);
+    status(e&&e.message? e.message : 'Location not available here.');
+    $('#q').focus();
+  }
+};
+/* radius slider: 1 to 1000 km, log scale */
+function radKm(v){ const k=Math.pow(10,v/1000*3); return k<10? Math.round(k*10)/10 : Math.round(k); }
+function updRad(){ S.radius=radKm(+$('#rad').value); $('#radv').textContent=S.radius+' km'; }
+$('#rad').addEventListener('input',updRad); updRad();
+
+/* address search with suggestions */
+let sugg=[], sel=-1, tq=null, lastQ='';
+$('#q').addEventListener('input',()=>{ clearTimeout(tq); tq=setTimeout(suggest,350); });
+$('#q').addEventListener('keydown',e=>{
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){ e.preventDefault(); if(!sugg.length) return; sel=(sel+(e.key==='ArrowDown'?1:-1)+sugg.length)%sugg.length; drawSugg(); }
+  else if(e.key==='Enter'){ e.preventDefault(); if(sugg.length) pick(sugg[Math.max(sel,0)]); else suggest(true); }
+  else if(e.key==='Escape'){ hideSugg(); }
+});
+document.addEventListener('click',e=>{ if(!e.target.closest('.search')) hideSugg(); });
+function hideSugg(){ $('#sugg').style.display='none'; }
+async function suggest(pickFirst){
+  const q=$('#q').value.trim();
+  if(q.length<3){ sugg=[]; hideSugg(); return; }
+  lastQ=q;
+  try{
+    const d=await (await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=6&accept-language=en&q=${encodeURIComponent(q)}`)).json();
+    if(q!==lastQ) return;
+    sugg=d; sel=-1;
+    if(pickFirst && d[0]) return pick(d[0]);
+    drawSugg();
+  }catch(e){}
+}
+function drawSugg(){
+  const box=$('#sugg');
+  if(!sugg.length){ box.innerHTML='<div>No match</div>'; box.style.display='block'; return; }
+  box.innerHTML=sugg.map((x,i)=>{
+    const parts=x.display_name.split(', ');
+    return `<div data-i="${i}" class="${i===sel?'on':''}">${esc(x.name||parts[0])}<small>${esc(parts.slice(x.name?1:1).join(', '))}</small></div>`;
+  }).join('');
+  box.style.display='block';
+  box.onclick=e=>{ const el=e.target.closest('[data-i]'); if(el) pick(sugg[+el.dataset.i]); };
+}
+async function pick(x){
+  hideSugg(); if(S.running) return;
+  $('#q').value=x.display_name.split(', ').slice(0,3).join(', ');
+  const a=x.address||{};
+  setPlace(+x.lat,+x.lon,a);
+  S.street = a.road || ((x.category||x.class)==='highway' ? x.name : '');
+  busy(true);
+  try{ await scan(); }catch(e){ busy(false); status(e.message||'Something went wrong'); }
+}
+
+function groupBy(ents,maxTerms){
+  const out=[]; let cur=[], n=0;
+  ents.forEach(e=>{ const k=Math.min(e.variants.length,4); if(cur.length && n+k>maxTerms){ out.push(cur); cur=[]; n=0; } cur.push(e); n+=k; });
+  if(cur.length) out.push(cur); return out;
+}
+async function scan(){
+  $('#hero').classList.add('small');
+  $('#list').innerHTML=''; S.items=[]; S.clusters=[];
+  const where=S.street? S.street+(S.city?', '+S.city:'') : (S.city||'your area');
+  status(`Scanning around ${where}…`);
+  let ents=[];
+  try{ ents=await placesInRadius(); }catch(e){}
+  if(S.city && !ents.some(p=>p.name===S.city)) ents.unshift(mkEntity(S.city,S.lat,S.lon,1e9,[]));
+  ents=ents.slice(0,20);
+  if(S.street){
+    let tags=[];
+    try{ tags=(await overpass(`[out:json][timeout:25];way[highway]["name"="${S.street.replace(/"/g,'')}"](around:400,${S.lat},${S.lon});out tags 50;`)).map(e=>e.tags); }catch(e){}
+    ents.unshift(mkEntity(S.street,S.lat,S.lon,2e9,tags));
+  }
+  S.names=ents;
+  if(!ents.length){ busy(false); status('Could not work out where this is. Try another search.'); return; }
+
+  const byUrl=new Map();
+  const country=S.country?` sourcecountry:${gdeltCountry(S.country)}`:'';
+  const gGroups=groupBy(ents,10), nGroups=groupBy(ents,6);
+  const total=gGroups.length+nGroups.length; let done=0;
+  const tick=()=>{ done++; S.items=[...new Set(byUrl.values())]; S.clusters=cluster(S.items); render();
+    status(done<total? `Scanning around ${where}… ${Math.round(done/total*100)}%` : `${S.clusters.length} stories around ${where} (${S.radius} km, last month)`); };
+
+  const gd=(async()=>{ for(const g of gGroups){
+    const t=g.flatMap(e=>e.variants.slice(0,4)).map(gq);
+    addArticles(await gdelt((t.length===1?t[0]:'('+t.join(' OR ')+')')+country),g,byUrl); tick(); } })();
+  const gn=(async()=>{ let i=0; const w=async()=>{ while(i<nGroups.length){ const g=nGroups[i++];
+    const res=await gnews(g.flatMap(e=>e.variants.slice(0,4)).map(gq).join(' OR '));
+    if(res) addArticles(res,g,byUrl); tick(); } }; await Promise.all([w(),w(),w()]); })();
+  await Promise.all([gd,gn]);
+  if(!S.clusters.length) status(`No news found around ${where} in the last month.`);
+  busy(false);
+}
+
+function render(){
+  const cls=S.clusters;
+  if(!cls.length){ $('#list').innerHTML=''; return; }
+  let html='', mk=null;
+  cls.slice(0,300).forEach(c=>{
+    const it=c.head, d=c.date;
+    const key=d.toLocaleString('en',{month:'long',year:'numeric'});
+    if(key!==mk){ html+=`<div class="month">${key}</div>`; mk=key; }
+    const img=it.img && /^https?:/.test(it.img);
+    const more=c.items.filter(x=>x!==it);
+    html+=`<div class="card ${img?'':'noimg'}"><div>
+      <div class="meta">${d.toISOString().slice(0,10)} · ${esc(it.domain||'')}${more.length?` · +${more.length} more`:''}</div>
+      <a class="title" href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.title)}</a>
+      <div class="tags">${c.exact?c.places.slice(0,2).map(p=>`<span class="tag">📍 ${esc(p)}</span>`).join(''):''}${c.ctx.filter(x=>x!=='general').map(x=>`<span class="tag ctx">${esc(x)}</span>`).join('')}</div>
+      ${more.length?`<details><summary>Same story in ${more.length} more ${more.length>1?'papers':'paper'}</summary>${more.map(m=>`<a href="${esc(m.url)}" target="_blank" rel="noopener"><span class="meta">${esc(m.domain)}</span><br>${esc(m.title)}</a>`).join('')}</details>`:''}
+    </div>${img?`<img loading="lazy" src="${esc(it.img)}" onerror="this.remove()">`:''}</div>`;
+  });
+  $('#list').innerHTML=html;
+}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+$('#radar').onclick=()=>$('#go').click();
+</script>
+</body>
+</html>

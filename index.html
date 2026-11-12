@@ -355,17 +355,26 @@ async function scan(){
   const country=S.country?` sourcecountry:${gdeltCountry(S.country)}`:'';
   const gGroups=groupBy(ents,10), nGroups=groupBy(ents,6);
   const total=gGroups.length+nGroups.length; let done=0;
-  const tick=()=>{ done++; S.items=[...new Set(byUrl.values())]; S.clusters=cluster(S.items); render();
-    status(done<total? `Scanning around ${where}… ${Math.round(done/total*100)}%` : `${S.clusters.length} stories around ${where} (${S.radius} km, last month)`); };
+  const t0=Date.now(), est=Math.max(gGroups.length*5.5, Math.ceil(nGroups.length/3)*3)+3;
+  let gDone=0;
+  const showProgress=()=>{
+    const el=(Date.now()-t0)/1000;
+    const left=Math.max(1,Math.round(Math.max((gGroups.length-gDone)*5.5, est-el)));
+    status(`Scanning around ${where}… ${Math.round(done/total*100)}% · ${Math.round(el)} s · about ${left} s left`);
+  };
+  showProgress(); const timer=setInterval(showProgress,1000);
+  const tick=()=>{ done++; S.items=[...new Set(byUrl.values())]; S.clusters=cluster(S.items); render(); };
 
   const gd=(async()=>{ for(const g of gGroups){
     const t=g.flatMap(e=>e.variants.slice(0,4)).map(gq);
-    addArticles(await gdelt((t.length===1?t[0]:'('+t.join(' OR ')+')')+country),g,byUrl); tick(); } })();
+    addArticles(await gdelt((t.length===1?t[0]:'('+t.join(' OR ')+')')+country),g,byUrl); gDone++; tick(); } })();
   const gn=(async()=>{ let i=0; const w=async()=>{ while(i<nGroups.length){ const g=nGroups[i++];
     const res=await gnews(g.flatMap(e=>e.variants.slice(0,4)).map(gq).join(' OR '));
     if(res) addArticles(res,g,byUrl); tick(); } }; await Promise.all([w(),w(),w()]); })();
   await Promise.all([gd,gn]);
-  if(!S.clusters.length) status(`No news found around ${where} in the last month.`);
+  clearInterval(timer);
+  const secs=Math.round((Date.now()-t0)/1000);
+  status(S.clusters.length? `${S.clusters.length} stories around ${where} (${S.radius} km, last month) · loaded in ${secs} s` : `No news found around ${where} in the last month (${secs} s).`);
   busy(false);
 }
 

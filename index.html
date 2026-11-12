@@ -61,7 +61,7 @@ details a{display:block;padding:6px 0;text-decoration:none;color:var(--ink)}
   <div class="hero" id="hero">
     <div class="radar" id="radar"></div>
     <h1>news<span>radar</span></h1>
-    <div class="ver">v1.4 · 13 Nov 2026</div>
+    <div class="ver">v1.5 · 13 Nov 2026</div>
     <div class="search"><input id="q" placeholder="Search an address, street or city" autocomplete="off"><div class="sugg" id="sugg"></div></div>
     <div class="rad"><div class="row"><span>Radius</span><b id="radv">20 km</b></div><input type="range" id="rad" min="0" max="1000" value="434"></div>
     <div class="or">or</div>
@@ -106,10 +106,12 @@ function mkEntity(name,lat,lon,score,tagsList){ return {name,lat,lon,score,count
 
 /* ---------- overpass: names in radius ---------- */
 const OVERPASS='https://overpass-api.de/api/interpreter';
+const OVERPASS_MIRRORS=['https://overpass-api.de/api/interpreter','https://overpass.private.coffee/api/interpreter','https://overpass.kumi.systems/api/interpreter'];
 async function overpass(q){
-  const r=await fetch(OVERPASS,{method:'POST',body:'data='+encodeURIComponent(q)});
-  if(!r.ok) throw new Error('Map data server busy ('+r.status+'), try again in a minute');
-  return (await r.json()).elements||[];
+  for(const u of OVERPASS_MIRRORS){
+    try{ const r=await fetch(u+'?data='+encodeURIComponent(q)); if(r.ok) return (await r.json()).elements||[]; }catch(e){}
+  }
+  throw new Error('Map data servers busy');
 }
 async function streetsNear(){
   const m=Math.min(S.radius,3)*1000;
@@ -269,7 +271,7 @@ function locate(){
   });
 }
 async function reverse(lat,lon){
-  const d=await (await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=12&addressdetails=1&accept-language=en`)).json();
+  const d=await (await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=18&addressdetails=1&accept-language=en`)).json();
   return d.address||{};
 }
 async function geocode(q){
@@ -281,6 +283,7 @@ function setPlace(lat,lon,a){
   S.lat=lat; S.lon=lon;
   S.city=a.city||a.town||a.village||a.municipality||a.county||'';
   S.country=a.country||''; S.cc=(a.country_code||'').toUpperCase();
+  S.addr=a;
 }
 
 $('#go').onclick=async()=>{
@@ -288,7 +291,7 @@ $('#go').onclick=async()=>{
   status('Finding you…');
   try{
     const [lat,lon]=await locate();
-    setPlace(lat,lon,await reverse(lat,lon));
+    const a=await reverse(lat,lon); setPlace(lat,lon,a); S.street=a.road||'';
     await scan();
   }catch(e){
     busy(false);
@@ -360,7 +363,7 @@ async function scan(){
   const byUrl=new Map();
   const update=()=>{ S.items=[...new Set(byUrl.values())]; S.clusters=cluster(S.items); render(); };
   // small radius: never search the whole city, only use it to make sure it is the right place
-  const cityTerm = small && S.city ? ' '+gq(S.city) : '';
+  const cityTerm = small && S.city ? ' '+S.city : '';
   const q=ents=>ents.flatMap(e=>e.variants.slice(0,3)).map(gq).join(' OR ');
   const showSearched=()=>{ $('#searched').innerHTML='Searching for: '+S.names.map(n=>'<b>'+esc(n.name)+'</b>').join(', ')+(cityTerm?' (in '+esc(S.city)+')':''); };
   const ask=async g=>{ asks++; const r=await gnews(q(g)+cityTerm); if(!r){ fails++; return; } addArticles(r,g,byUrl); update(); };
@@ -369,6 +372,10 @@ async function scan(){
   const main=[];
   if(S.street) main.push(mkEntity(S.street,S.lat,S.lon,2e9,[]));
   if(!small && S.city) main.push(mkEntity(S.city,S.lat,S.lon,1e9,[]));
+  const ad=S.addr||{};
+  if(small) [...new Set([ad.neighbourhood,ad.quarter,ad.suburb,ad.city_district].filter(x=>x&&x.length>=4&&x!==S.city&&x!==S.street))]
+    .forEach(n=>main.push(mkEntity(n,S.lat,S.lon,5e8,[])));
+  if(!main.length && S.city) main.push(mkEntity(S.city,S.lat,S.lon,1e9,[]));
   S.names=[...main]; showSearched();
   const first = main.length? ask(main) : Promise.resolve();
 

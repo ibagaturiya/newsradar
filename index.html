@@ -61,7 +61,7 @@ details a{display:block;padding:6px 0;text-decoration:none;color:var(--ink)}
   <div class="hero" id="hero">
     <div class="radar" id="radar"></div>
     <h1>news<span>radar</span></h1>
-    <div class="ver">v1.5 · 13 Nov 2026</div>
+    <div class="ver">v1.6 · 13 Nov 2026</div>
     <div class="search"><input id="q" placeholder="Search an address, street or city" autocomplete="off"><div class="sugg" id="sugg"></div></div>
     <div class="rad"><div class="row"><span>Radius</span><b id="radv">20 km</b></div><input type="range" id="rad" min="0" max="1000" value="434"></div>
     <div class="or">or</div>
@@ -163,22 +163,20 @@ const gq = s => `"${s.replace(/"/g,'')}"`;
 const gdeltCountry = c => c.toLowerCase().replace(/[^a-z]/g,'');
 
 /* ---------- source 2: Google News RSS (local papers, older years) ---------- */
+const withTimeout=(p,ms)=>Promise.race([p,new Promise(r=>setTimeout(()=>r(null),ms))]);
 const PROXIES=[
-  u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
-  u=>'https://corsproxy.io/?url='+encodeURIComponent(u),
-  u=>'https://api.codetabs.com/v1/proxy/?quest='+encodeURIComponent(u),
+  async u=>(await fetch('https://api.allorigins.win/raw?url='+encodeURIComponent(u))).text(),
+  async u=>{ const j=await (await fetch('https://api.allorigins.win/get?url='+encodeURIComponent(u))).json(); return j.contents||''; },
+  async u=>(await fetch('https://api.codetabs.com/v1/proxy/?quest='+encodeURIComponent(u))).text(),
+  async u=>(await fetch('https://cors.eu.org/'+u)).text(),
+  async u=>(await fetch('https://corsproxy.io/?url='+encodeURIComponent(u))).text(),
 ];
-let proxyOk=0;
+let proxyDead=false;
+// ask all proxies at once, take the first one that returns real RSS
 async function viaProxy(u){
-  for(let i=0;i<PROXIES.length;i++){
-    const p=(proxyOk+i)%PROXIES.length;
-    try{
-      const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),6000);
-      const r=await fetch(PROXIES[p](u),{signal:ctl.signal}); clearTimeout(t);
-      if(r.ok){ const x=await r.text(); if(x.includes('<rss')){ proxyOk=p; return x; } }
-    }catch(e){}
-  }
-  return null;
+  if(proxyDead) return null;
+  const tries=PROXIES.map(p=>withTimeout(p(u).then(x=>{ if(x&&x.includes('<rss')) return x; throw 0; }),7000).then(x=>{ if(!x) throw 0; return x; }));
+  try{ return await Promise.any(tries); }catch(e){ return null; }
 }
 const GN_LOCALE={CH:['de','CH'],DE:['de','DE'],AT:['de','AT'],LI:['de','CH'],FR:['fr','FR'],BE:['fr','BE'],IT:['it','IT'],ES:['es','ES'],PT:['pt-PT','PT'],NL:['nl','NL'],PL:['pl','PL'],
   GB:['en-GB','GB'],IE:['en-IE','IE'],US:['en-US','US'],CA:['en-CA','CA'],AU:['en-AU','AU'],SE:['sv','SE'],NO:['no','NO'],DK:['da','DK'],CZ:['cs','CZ'],JP:['ja','JP'],GE:['ka','GE'],RU:['ru','RU'],UA:['uk','UA']};
@@ -351,7 +349,6 @@ function groupBy(ents,maxTerms){
   ents.forEach(e=>{ const k=Math.min(e.variants.length,4); if(cur.length && n+k>maxTerms){ out.push(cur); cur=[]; n=0; } cur.push(e); n+=k; });
   if(cur.length) out.push(cur); return out;
 }
-const withTimeout=(p,ms)=>Promise.race([p,new Promise(r=>setTimeout(()=>r(null),ms))]);
 async function scan(){
   $('#hero').classList.add('small');
   $('#list').innerHTML=''; $('#searched').innerHTML=''; S.items=[]; S.clusters=[];
@@ -366,7 +363,11 @@ async function scan(){
   const cityTerm = small && S.city ? ' '+S.city : '';
   const q=ents=>ents.flatMap(e=>e.variants.slice(0,3)).map(gq).join(' OR ');
   const showSearched=()=>{ $('#searched').innerHTML='Searching for: '+S.names.map(n=>'<b>'+esc(n.name)+'</b>').join(', ')+(cityTerm?' (in '+esc(S.city)+')':''); };
-  const ask=async g=>{ asks++; const r=await gnews(q(g)+cityTerm); if(!r){ fails++; return; } addArticles(r,g,byUrl); update(); };
+  const ask=async g=>{ asks++; const r=await gnews(q(g)+cityTerm); if(!r){ fails++; if(fails>=2&&fails===asks) proxyDead=true; return; } addArticles(r,g,byUrl); update(); };
+  // backup source without proxy: GDELT, one combined request per phase
+  const country=S.country?` sourcecountry:${gdeltCountry(S.country)}`:'';
+  const gdAsk=async g=>{ const t=g.flatMap(e=>e.variants.slice(0,2)).slice(0,12).map(gq); if(!t.length) return;
+    const r=await withTimeout(gdelt((t.length===1?t[0]:'('+t.join(' OR ')+')')+country),12000); if(r){ addArticles(r,g,byUrl); update(); } };
 
   // 1. instant: the street itself, or the city when the radius is big
   const main=[];
@@ -377,28 +378,30 @@ async function scan(){
     .forEach(n=>main.push(mkEntity(n,S.lat,S.lon,5e8,[])));
   if(!main.length && S.city) main.push(mkEntity(S.city,S.lat,S.lon,1e9,[]));
   S.names=[...main]; showSearched();
-  const first = main.length? ask(main) : Promise.resolve();
+  proxyDead=false;
+  const first = main.length? Promise.all([ask(main),gdAsk(main)]) : Promise.resolve();
 
   // 2. meanwhile find districts (and streets for small radius) inside the radius, then scan them in parallel
   const more=(async()=>{
     const [places,streets]=await Promise.all([
-      withTimeout(placesInRadius().catch(()=>null),6000),
-      S.radius<=3? withTimeout(streetsNear().catch(()=>null),6000) : null ]);
+      withTimeout(placesInRadius().catch(()=>null),10000),
+      S.radius<=3? withTimeout(streetsNear().catch(()=>null),10000) : null ]);
     const seen=new Set(main.map(m=>m.name));
     if(small && S.city) seen.add(S.city);
     const rest=[...(places||[]).slice(0,12),...(streets||[]).slice(0,14)].filter(p=>!seen.has(p.name)&&seen.add(p.name));
     if(!rest.length) return;
     S.names=[...main,...rest]; showSearched();
     phase='Scanning nearby places';
+    const gdRest=gdAsk(rest);
     const groups=groupBy(rest,6); let i=0;
     const w=async()=>{ while(i<groups.length) await ask(groups[i++]); };
-    await Promise.all([w(),w(),w(),w(),w(),w()]);
+    await Promise.all([w(),w(),w(),w(),w(),w(),gdRest]);
   })();
 
   await Promise.all([first,more]);
   clearInterval(timer);
   if(S.clusters.length) status(`${S.clusters.length} stories within ${S.radius} km of ${where} · ${secs()} s`);
-  else if(asks && fails===asks) status(`Could not reach Google News (the free proxy is busy). Try again in a minute.`);
+  else if(asks && fails===asks) status(`No news found, and Google News was not reachable (free proxy busy), so only the backup source was searched (${secs()} s).`);
   else status(`No news found within ${S.radius} km of ${where} (${secs()} s).`);
   busy(false);
 }
